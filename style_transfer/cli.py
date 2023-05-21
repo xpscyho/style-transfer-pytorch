@@ -166,6 +166,8 @@ def main():
                    help='the content weight')
     p.add_argument('--tv-weight', '-tw', **arg_info('tv_weight'),
                    help='the smoothing weight')
+    p.add_argument('--tv-beta', '-tb', **arg_info('tv_beta'),
+                   help='the smoothing exponent')
     p.add_argument('--optimizer', **arg_info('optimizer'),
                    choices=['adam', 'lbfgs'],
                    help='the optimizer to use')

@@ -181,18 +181,69 @@ class StyleLossW2(nn.Module):
         return mean_diff + cov_diff
 
 
-class TVLoss(nn.Module):
-    """L2 total variation loss (nine point stencil)."""
+def v_beta_loss(x, reduction="mean", channel_reduction=None, beta=2.0, eps=1e-8):
+    """V^beta regularizer (enhancements: vectorial, nine point stencil).
 
-    def forward(self, input):
-        input = F.pad(input, (1, 1, 1, 1), 'replicate')
-        s1, s2 = slice(1, -1), slice(2, None)
-        s3, s4 = slice(None, -1), slice(1, None)
-        d1 = (input[..., s1, s2] - input[..., s1, s1]).pow(2).mean() / 3
-        d2 = (input[..., s2, s1] - input[..., s1, s1]).pow(2).mean() / 3
-        d3 = (input[..., s4, s4] - input[..., s3, s3]).pow(2).mean() / 12
-        d4 = (input[..., s4, s3] - input[..., s3, s4]).pow(2).mean() / 12
-        return 2 * (d1 + d2 + d3 + d4)
+    A nine point stencil vectorial version of the V^beta regularizer from "Understanding
+    Deep Image Representations by Inverting Them", Mahendran et al (2014)
+    (https://arxiv.org/abs/1412.0035).
+
+    The nine-point stencil is from "Fundamental Solutions of 9-point Discrete
+    Laplacians; Derivation and Tables", Lynch (1992)
+    (https://docs.lib.purdue.edu/cgi/viewcontent.cgi?article=1928&context=cstech).
+
+    Vectorial total variation was proposed in "Color TV: total variation methods for
+    restoration of vector-valued images", Blomgren et al (1998)
+    (https://ieeexplore.ieee.org/document/661180).
+
+    The total variation regularizer is given by beta=1. The common "TV loss" is given by
+    beta=2.
+
+    Args:
+        x: Input tensor, an image in ...CHW format.
+        reduction: Reduction for the loss, "mean", "sum", or "none".
+        channel_reduction: Reduction for the channel dimension, "mean", "sum", or
+            "none". If None, defaults to the value of `reduction`. If "none", the
+            loss will treat the color channels independently (not be vectorial).
+        beta: Exponent for the regularizer.
+        eps: Small constant to avoid NaN gradient.
+    """
+    reductions = {"mean": torch.mean, "sum": torch.sum, "none": lambda x, **kwargs: x}
+    channel_reduction = channel_reduction or reduction
+    l, m, h = slice(None, -2), slice(1, -1), slice(2, None)
+    x = torch.nn.functional.pad(x, (1, 1, 1, 1), "replicate")
+    target = x[..., m, m]
+    ml = (x[..., m, l] - target) ** 2 / 3
+    lm = (x[..., l, m] - target) ** 2 / 3
+    mh = (x[..., m, h] - target) ** 2 / 3
+    hm = (x[..., h, m] - target) ** 2 / 3
+    ll = (x[..., l, l] - target) ** 2 / 12
+    hh = (x[..., h, h] - target) ** 2 / 12
+    hl = (x[..., h, l] - target) ** 2 / 12
+    lh = (x[..., l, h] - target) ** 2 / 12
+    diffs = ml + lm + mh + hm + ll + hh + hl + lh
+    losses = torch.pow(reductions[channel_reduction](diffs, dim=-3) + eps, beta / 2)
+    return reductions[reduction](losses)
+
+
+class VBetaLoss(nn.Module):
+    __doc__ = v_beta_loss.__doc__
+
+    def __init__(self, reduction="mean", channel_reduction=None, beta=2.0, eps=1e-8):
+        super().__init__()
+        self.reduction = reduction
+        self.channel_reduction = channel_reduction
+        self.beta = beta
+        self.eps = eps
+
+    def forward(self, x):
+        return v_beta_loss(
+            x,
+            reduction=self.reduction,
+            channel_reduction=self.channel_reduction,
+            beta=self.beta,
+            eps=self.eps,
+        )
 
 
 class SumLoss(nn.ModuleList):
@@ -350,6 +401,7 @@ class StyleTransfer:
                 style_weights=None,
                 content_weight: float = 0.015,
                 tv_weight: float = 2.,
+                tv_beta: float = 2.,
                 optimizer: str = 'adam',
                 min_scale: int = 128,
                 end_scale: int = 512,
@@ -373,7 +425,7 @@ class StyleTransfer:
         if len(style_images) != len(style_weights):
             raise ValueError('style_images and style_weights must have the same length')
 
-        tv_loss = Scale(LayerApply(TVLoss(), 'input'), tv_weight)
+        tv_loss = Scale(LayerApply(VBetaLoss(beta=tv_beta), 'input'), tv_weight)
 
         scales = gen_scales(min_scale, end_scale)
 
